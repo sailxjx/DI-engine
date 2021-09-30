@@ -70,6 +70,7 @@ setup(
         'enum_tools',
         'scipy',
         'trueskill',
+        'rich'
     ],
     extras_require={
         'test': [

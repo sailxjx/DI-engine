@@ -6,6 +6,8 @@ import yaml
 from tabulate import tabulate
 from tensorboardX import SummaryWriter
 from typing import Optional, Tuple, Union, Dict, Any
+from rich.progress import BarColumn, Progress, TextColumn, \
+    TimeRemainingColumn, ProgressColumn, Text, Task
 
 
 def build_logger(
@@ -39,7 +41,7 @@ def build_logger(
 class LoggerFactory(object):
 
     @classmethod
-    def create_logger(cls, path: str, name: str = 'default', level: Union[int, str] = logging.INFO) -> logging.Logger:
+    def create_logger(cls, path: str, name: str = 'default', level: Union[int, str] = logging.ERROR) -> logging.Logger:
         r"""
         Overview:
             Create logger using logging
@@ -100,6 +102,36 @@ class LoggerFactory(object):
         data = [datak, datav]
         s = "\n" + tabulate(data, tablefmt='grid')
         return s
+
+    @classmethod
+    def create_progress_logger(cls) -> Progress:
+        """
+        The progress logger is usually used to display the entire training progress,
+        the remaining time and the number of remaining iterations.
+        """
+
+        class EpochSpeedColumn(ProgressColumn):
+            """Renders human readable speed."""
+
+            def render(self, task: "Task") -> Text:
+                """Show data transfer speed."""
+                speed = task.finished_speed or task.speed
+                if speed is None:
+                    return Text("?", style="progress.data.speed")
+                return Text("{:.0f} epochs/s".format(speed), style="progress.data.speed")
+
+        progress = Progress(
+            TextColumn("[bold blue]{task.description}", justify="right"),
+            BarColumn(bar_width=None),
+            "[progress.percentage]{task.percentage:>3.1f}%",
+            "•",
+            "[green]{task.completed}/{task.total}"
+            "[white] •",
+            EpochSpeedColumn(),
+            "•",
+            TimeRemainingColumn(),
+        )
+        return progress
 
 
 class DistributionTimeImage:

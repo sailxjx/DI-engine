@@ -11,6 +11,7 @@ from ding.worker import BaseLearner, InteractionSerialEvaluator, BaseSerialComma
 from ding.config import read_config, compile_config
 from ding.policy import create_policy, PolicyFactory
 from ding.utils import set_pkg_seed
+from ding.utils.log_helper import LoggerFactory
 
 
 def serial_pipeline(
@@ -87,33 +88,37 @@ def serial_pipeline(
         new_data = collector.collect(n_sample=cfg.policy.random_collect_size, policy_kwargs=collect_kwargs)
         replay_buffer.push(new_data, cur_collector_envstep=0)
         collector.reset_policy(policy.collect_mode)
-    for _ in range(max_iterations):
-        collect_kwargs = commander.step()
-        # Evaluate policy performance
-        if evaluator.should_eval(learner.train_iter):
-            stop, reward = evaluator.eval(learner.save_checkpoint, learner.train_iter, collector.envstep)
-            if stop:
-                break
-        # Collect data by default config n_sample/n_episode
-        new_data = collector.collect(train_iter=learner.train_iter, policy_kwargs=collect_kwargs)
-        replay_buffer.push(new_data, cur_collector_envstep=collector.envstep)
-        # Learn policy from collected data
-        for i in range(cfg.policy.learn.update_per_collect):
-            # Learner will train ``update_per_collect`` times in one iteration.
-            train_data = replay_buffer.sample(learner.policy.get_attribute('batch_size'), learner.train_iter)
-            if train_data is None:
-                # It is possible that replay buffer's data count is too few to train ``update_per_collect`` times
-                logging.warning(
-                    "Replay buffer's data can only train for {} steps. ".format(i) +
-                    "You can modify data collect config, e.g. increasing n_sample, n_episode."
-                )
-                break
-            learner.train(train_data, collector.envstep)
-            if learner.policy.get_attribute('priority'):
-                replay_buffer.update(learner.priority_info)
-        if cfg.policy.on_policy:
-            # On-policy algorithm must clear the replay buffer.
-            replay_buffer.clear()
+    progress = LoggerFactory.create_progress_logger()
+    with progress:
+        task_id = progress.add_task("Overall Task", total=max_iterations)
+        for _ in range(max_iterations):
+            progress.update(task_id, advance=1)
+            collect_kwargs = commander.step()
+            # Evaluate policy performance
+            if evaluator.should_eval(learner.train_iter):
+                stop, reward = evaluator.eval(learner.save_checkpoint, learner.train_iter, collector.envstep)
+                if stop:
+                    break
+            # Collect data by default config n_sample/n_episode
+            new_data = collector.collect(train_iter=learner.train_iter, policy_kwargs=collect_kwargs)
+            replay_buffer.push(new_data, cur_collector_envstep=collector.envstep)
+            # Learn policy from collected data
+            for i in range(cfg.policy.learn.update_per_collect):
+                # Learner will train ``update_per_collect`` times in one iteration.
+                train_data = replay_buffer.sample(learner.policy.get_attribute('batch_size'), learner.train_iter)
+                if train_data is None:
+                    # It is possible that replay buffer's data count is too few to train ``update_per_collect`` times
+                    logging.warning(
+                        "Replay buffer's data can only train for {} steps. ".format(i) +
+                        "You can modify data collect config, e.g. increasing n_sample, n_episode."
+                    )
+                    break
+                learner.train(train_data, collector.envstep)
+                if learner.policy.get_attribute('priority'):
+                    replay_buffer.update(learner.priority_info)
+            if cfg.policy.on_policy:
+                # On-policy algorithm must clear the replay buffer.
+                replay_buffer.clear()
 
     # Learner's after_run hook.
     learner.call_hook('after_run')
