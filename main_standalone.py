@@ -1,6 +1,7 @@
 from collections import deque
 import gym
 import random
+import pickle
 import torch
 import time
 import numpy as np
@@ -38,6 +39,7 @@ class Task:
 
     def __init__(self) -> None:
         self.middleware = []
+        self.finish = False
 
     def use(self, fn) -> None:
         self.middleware.append(fn)
@@ -46,6 +48,8 @@ class Task:
         for i in range(max_step):
             ctx = Context(total_step=i)  # Initial context
             self.run_one_step(ctx, self.middleware)
+            if self.finish:
+                break
 
     def run_one_step(self, ctx, middleware):
         if len(middleware) == 0:
@@ -67,6 +71,9 @@ class DequeBuffer:
 
     def sample(self, size):
         return random.sample(self.memory, size)
+
+    def count(self):
+        return len(self.memory)
 
 
 def get_model(state_size, action_size):
@@ -231,6 +238,62 @@ def reset_env(env):
     return _reset_env
 
 
+def save_and_quit(task, buffer, model, max_reward, n_episode):
+    '''
+    Save checkpoint and data if n_episode's reward is greater than max_reward
+    '''
+    n_win = 0
+
+    def save_data():
+        states = [d[0] for d in buffer.sample(buffer.count())]
+        data = {"states": torch.tensor(states).float()}
+        with torch.no_grad():
+            data["q"] = model(data["states"])
+        with open("tmp/data.pkl", "wb") as f:
+            pickle.dump(data, f, pickle.HIGHEST_PROTOCOL)
+
+    def _save_and_quit(ctx, chain):
+        chain()
+        nonlocal n_win
+        if ctx.done:
+            if max_reward <= ctx.step:
+                n_win += 1
+            else:
+                n_win = 0
+            if n_win >= n_episode:
+                save_data()
+                template = "[green]Total reward is greater than {} in the lastest {} episodes, final episode {}, bye.[/green]"
+                print(template.format(max_reward, n_episode, ctx.episode))
+                task.finish = True
+
+    return _save_and_quit
+
+
+def train_with_expert(model, size=64):
+    with open("tmp/data.pkl", "rb") as f:
+        data = pickle.load(f)
+    states = data["states"]
+    q = data["q"]
+
+    loss_fn = torch.nn.MSELoss(reduction="mean")
+    learning_rate = 0.005
+    optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate)
+
+    def _train_with_expert(ctx, chain):
+        indice = random.sample(range(len(q)), k=size)
+        _states = states[indice]
+        _q = q[indice]
+        _q_hat = model(_states)
+        loss = loss_fn(_q_hat, _q)
+        optimizer.zero_grad()
+        loss.backward()
+        optimizer.step()
+
+        chain()
+
+    return _train_with_expert
+
+
 def main():
     # Initial
     env = gym.make("CartPole-v0")
@@ -248,11 +311,15 @@ def main():
     task.use(dqn.collect(env, max_step=500))
     task.use(dqn.memorize(buffer))
 
+    task.use(train_with_expert(model))
+
     task.use(speed_profile.before)
     task.use(dqn.replay(model, buffer))
     task.use(speed_profile.after)
 
-    task.run(max_step=100000)
+    task.use(save_and_quit(task, buffer, model, 190, 3))
+
+    task.run(max_step=10000)
 
 
 if __name__ == "__main__":
