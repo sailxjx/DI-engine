@@ -36,36 +36,25 @@ class Context(dict):
 
 class Task:
 
-    def __init__(self, env) -> None:
+    def __init__(self) -> None:
         self.middleware = []
-        self.env = env
-        self.finish = False
 
     def use(self, fn) -> None:
         self.middleware.append(fn)
 
-    def run(self, max_step):
-        state = self.env.reset()
-        ctx = Context(state=state)  # Initial context
-        while not self.finish:
+    def run(self, max_step=1e10):
+        for i in range(max_step):
+            ctx = Context(total_step=i)  # Initial context
             self.run_one_step(ctx, self.middleware)
-            if ctx.done:
-                ctx = Context(total_step=ctx.total_step + 1, step=0, episode=ctx.episode + 1, state=self.env.reset())
-            else:
-                ctx = Context(
-                    total_step=ctx.total_step + 1, step=ctx.step + 1, episode=ctx.episode, state=ctx.next_state
-                )
-            if ctx.total_step >= max_step:
-                self.finish = True
 
     def run_one_step(self, ctx, middleware):
         if len(middleware) == 0:
             return
 
-        def next():
+        def chain():
             self.run_one_step(ctx, middleware[1:])
 
-        middleware[0](ctx, next)
+        middleware[0](ctx, chain)
 
 
 class DequeBuffer:
@@ -98,22 +87,22 @@ class DQN:
 
     def act(self, model, action_size):
 
-        def _act(ctx, next):
+        def _act(ctx, chain):
             if np.random.rand() < self.epsilon:
                 ctx.action = random.randrange(action_size)
             else:
                 with torch.no_grad():
                     act_values = model(torch.tensor(ctx.state).float().reshape(1, -1))[0]
                     ctx.action = act_values.argmax().item()
-            next()
+            chain()
 
         return _act
 
     def collect(self, env, max_step):
 
-        def _collect(ctx, next):
+        def _collect(ctx, chain):
             ctx.next_state, ctx.reward, ctx.done, _ = env.step(ctx.action)
-            next()
+            chain()
             if ctx.step >= max_step:
                 ctx.done = True
 
@@ -121,9 +110,9 @@ class DQN:
 
     def memorize(self, buffer):
 
-        def _memorize(ctx, next):
+        def _memorize(ctx, chain):
             buffer.push((ctx.state, ctx.action, ctx.reward, ctx.next_state, ctx.done))
-            next()
+            chain()
 
         return _memorize
 
@@ -132,9 +121,9 @@ class DQN:
         learning_rate = 0.001
         optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate)
 
-        def _replay(ctx, next):
+        def _replay(ctx, chain):
             if ctx.total_step < self.batch_size:
-                return next()
+                return chain()
 
             minibatch = buffer.sample(self.batch_size)
             states, targets_f = [], []
@@ -164,14 +153,15 @@ class DQN:
 
             if ctx.done:
                 template = '[bright_blue]'
-                template += 'Episode/Reward: {:>3d}/{:<3d} '
+                template += 'Episode: {:>3d} '
+                template += '| Reward: {:>3d} '
                 template += '| Total: {:<4d} '
                 template += '| Loss: {:>6.5f} '
                 template += '| Epsilon: {:>3.2f}'
                 template += '[/bright_blue]'
                 print(template.format(ctx.episode, ctx.step, ctx.total_step, loss.item(), self.epsilon))
 
-            next()
+            chain()
 
         return _replay
 
@@ -187,14 +177,14 @@ class SpeedProfile():
         self.backward_start = 0
         self.last_start = time.time()
 
-    def before(self, ctx, next):
+    def before(self, ctx, chain):
         self.forward_start = time.time()
-        next()
+        chain()
         self.backward.append(time.time() - self.backward_start)
 
-    def after(self, ctx, next):
+    def after(self, ctx, chain):
         self.forward.append(time.time() - self.forward_start)
-        next()
+        chain()
         self.backward_start = time.time()
         if ctx.total_step and ctx.total_step % self.eval_step == 0:
             duration = time.time() - self.last_start
@@ -219,6 +209,28 @@ class SpeedProfile():
                 ))
 
 
+def reset_env(env):
+    state, step, episode = None, 0, 0
+
+    def _reset_env(ctx, chain):
+        nonlocal state, step, episode
+        ctx.state = env.reset() if state is None else state
+        ctx.step = step
+        ctx.episode = episode
+
+        chain()
+
+        if ctx.done:
+            state = None
+            episode += 1
+            step = 0
+        else:
+            state = ctx.next_state
+            step += 1
+
+    return _reset_env
+
+
 def main():
     # Initial
     env = gym.make("CartPole-v0")
@@ -228,9 +240,10 @@ def main():
     buffer = DequeBuffer()
     speed_profile = SpeedProfile("replay")
 
-    task = Task(env)
+    task = Task()
     dqn = DQN()
 
+    task.use(reset_env(env))
     task.use(dqn.act(model, action_size))
     task.use(dqn.collect(env, max_step=500))
     task.use(dqn.memorize(buffer))
