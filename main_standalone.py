@@ -1,4 +1,5 @@
 from collections import deque
+from typing import List
 import gym
 import random
 import pickle
@@ -42,7 +43,10 @@ class Task:
         self.finish = False
 
     def use(self, fn) -> None:
-        self.middleware.append(fn)
+        if isinstance(fn, List):
+            self.middleware += fn
+        else:
+            self.middleware.append(fn)
 
     def run(self, max_step=1e10):
         for i in range(max_step):
@@ -91,6 +95,14 @@ class DQN:
         self.epsilon_min = 0.01
         self.epsilon_decay = 0.999
         self.batch_size = 64
+
+    def middleware(self, model, action_size, env, max_step, buffer):
+        return [
+            self.act(model, action_size),
+            self.collect(env, max_step=max_step),
+            self.memorize(buffer),
+            self.replay(model, buffer)
+        ]
 
     def act(self, model, action_size):
 
@@ -307,6 +319,7 @@ def main():
     dqn = DQN()
 
     task.use(reset_env(env))
+    # task.use(dqn.middleware(model, action_size, env, 500, buffer))
     task.use(dqn.act(model, action_size))
     task.use(dqn.collect(env, max_step=500))
     task.use(dqn.memorize(buffer))
@@ -317,7 +330,7 @@ def main():
     task.use(dqn.replay(model, buffer))
     task.use(speed_profile.after)
 
-    task.use(save_and_quit(task, buffer, model, 190, 3))
+    task.use(save_and_quit(task, buffer, model, 195, 3))
 
     task.run(max_step=10000)
 
