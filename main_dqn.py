@@ -45,6 +45,7 @@ class Context(dict):
         self.reward = reward
         self.done = done
         self.policy_output = policy_output
+        self.backward_stack = []
 
 
 class Task:
@@ -56,8 +57,6 @@ class Task:
         self.train_iter = 0
         self.last_eval_iter = -1
         # For eager mode
-        self.stack = []
-        self.total_step = 0
         self.ctx = Context(total_step=0)
 
     def use(self, fn) -> None:
@@ -88,19 +87,17 @@ class Task:
                 pass
 
     def forward(self, fn):
-        g = fn(self.ctx)
+        r = g = fn(self.ctx)
         if isinstance(g, GeneratorType):
-            next(g)
-            self.stack.append(g)
-        return self.ctx
+            r = next(g)
+            self.ctx.backward_stack.append(g)
+        return r
 
     def backward(self):
-        for g in reversed(self.stack):
+        for g in reversed(self.ctx.backward_stack):
             for _ in g:
                 pass
-        self.stack = []
-        self.total_step += 1
-        self.ctx = Context(total_step=self.total_step)
+        self.ctx = Context(total_step=self.ctx.total_step + 1)
 
 
 class DequeBuffer:
@@ -207,6 +204,40 @@ class DQNPipeline:
         return _eval
 
 
+def speed_profile(name):
+    buffer = []
+
+    def _speed_profile(fn):
+
+        def _executor(ctx):
+            # Execute before step's yield
+            total_time = 0
+            start = time.time()
+            r = g = fn(ctx)
+            if isinstance(g, GeneratorType):
+                r = next(g)
+            total_time += time.time() - start
+
+            yield r
+
+            # Execute after step's yield
+            start = time.time()
+            if isinstance(g, GeneratorType):
+                for _ in g:
+                    pass
+            total_time += time.time() - start
+
+            nonlocal buffer
+            buffer.append(total_time)
+            if ctx.total_step % 100 == 99:
+                print("Total execute time for {}: {:.2f} ms/step".format(name, np.array(buffer).mean() * 1000))
+                buffer = []
+
+        return _executor
+
+    return _speed_profile
+
+
 def main(cfg, create_cfg, seed=0):
 
     def wrapped_cartpole_env():
@@ -264,11 +295,14 @@ def main_eager(cfg, create_cfg, seed=0):
     act = dqn.act(collector_env, task)
     collect = dqn.collect(collector_env, replay_buffer, task)
     learn = dqn.learn(replay_buffer, task)
+
+    sp = speed_profile("learn")
+
     for _ in range(1000):
         task.forward(evaluate)
         task.forward(act)
         task.forward(collect)
-        task.forward(learn)
+        task.forward(sp(learn))
         # Run rest logic and re init context
         task.backward()
         if task.finish:
