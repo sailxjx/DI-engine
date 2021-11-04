@@ -47,6 +47,13 @@ class Context(dict):
         self.done = done
         self.policy_output = policy_output
         self.backward_stack = []
+        self._kept = {}
+
+    def set_default(self, key, value, keep=False):
+        if key not in self:
+            self[key] = value
+        if keep:
+            self._kept[key] = True
 
 
 class Task:
@@ -54,9 +61,6 @@ class Task:
     def __init__(self) -> None:
         self.middleware = []
         self.finish = False
-        self.collect_env_step = 0
-        self.train_iter = 0
-        self.last_eval_iter = -1
         # For eager mode
         self.ctx = Context(total_step=0)
 
@@ -64,9 +68,9 @@ class Task:
         self.middleware.append(fn)
 
     def run(self, max_step=1e10):
-        for i in range(max_step):
-            ctx = Context(total_step=i)  # Initial context
-            self.run_one_step(ctx, self.middleware)
+        for _ in range(max_step):
+            self.ctx = self.renew_ctx(self.ctx)
+            self.run_one_step(self.ctx, self.middleware)
             if self.finish:
                 break
 
@@ -98,7 +102,13 @@ class Task:
         for g in reversed(self.ctx.backward_stack):
             for _ in g:
                 pass
-        self.ctx = Context(total_step=self.ctx.total_step + 1)
+        self.ctx = self.renew_ctx(self.ctx)
+
+    def renew_ctx(self, ctx):
+        new_ctx = Context(total_step=ctx.total_step + 1)
+        for k in ctx._kept:
+            new_ctx[k] = ctx[k]
+        return new_ctx
 
 
 class DequeBuffer:
@@ -142,8 +152,9 @@ class DQNPipeline:
     def collect(self, env, buffer_, task):
 
         def _collect(ctx):
+            ctx.set_default("collect_env_step", 0, keep=True)
             timesteps = env.step(ctx.action)
-            task.collect_env_step += len(timesteps)
+            ctx.collect_env_step += len(timesteps)
             timesteps = to_tensor(timesteps, dtype=torch.float32)
             for env_id, timestep in timesteps.items():
                 transition = self.policy.collect_mode.process_transition(
@@ -157,18 +168,19 @@ class DQNPipeline:
     def learn(self, buffer_, task):
 
         def _learn(ctx):
+            ctx.set_default("train_iter", 0, keep=True)
             for i in range(self.cfg.policy.learn.update_per_collect):
                 data = buffer_.sample(self.policy.learn_mode.get_attribute('batch_size'))
                 if data is None:
                     break
                 learn_output = self.policy.learn_mode.forward(data)
-                if task.train_iter % 20 == 0:
+                if ctx.train_iter % 20 == 0:
                     print(
                         'Current Training: Train Iter({})\tLoss({:.3f})'.format(
-                            task.train_iter, learn_output['total_loss']
+                            ctx.train_iter, learn_output['total_loss']
                         )
                     )
-                task.train_iter += 1
+                ctx.train_iter += 1
             yield
 
         return _learn
@@ -176,7 +188,9 @@ class DQNPipeline:
     def evaluate(self, env, task):
 
         def _eval(ctx):
-            eval_interval = task.train_iter - task.last_eval_iter
+            ctx.set_default("train_iter", 0, keep=True)
+            ctx.set_default("last_eval_iter", -1, keep=True)
+            eval_interval = ctx.train_iter - ctx.last_eval_iter
             if eval_interval < self.cfg.policy.eval.evaluator.eval_freq:
                 yield
                 return
@@ -195,9 +209,9 @@ class DQNPipeline:
                         eval_monitor.update_reward(env_id, reward)
             episode_reward = eval_monitor.get_episode_reward()
             eval_reward = np.mean(episode_reward)
-            stop_flag = eval_reward >= self.cfg.env.stop_value and task.train_iter > 0
-            print('Current Evaluation: Train Iter({})\tEval Reward({:.3f})'.format(task.train_iter, eval_reward))
-            task.last_eval_iter = task.train_iter
+            stop_flag = eval_reward >= self.cfg.env.stop_value and ctx.train_iter > 0
+            print('Current Evaluation: Train Iter({})\tEval Reward({:.3f})'.format(ctx.train_iter, eval_reward))
+            ctx.last_eval_iter = ctx.train_iter
             if stop_flag:
                 task.finish = True
             yield
@@ -218,8 +232,6 @@ def speed_profile():
             if isinstance(g, GeneratorType):
                 r = next(g)
             total_time += time.time() - start
-
-            yield r
 
             # Execute after step's yield
             start = time.time()
@@ -311,5 +323,5 @@ def main_eager(cfg, create_cfg, seed=0):
 
 
 if __name__ == "__main__":
-    # main(main_config, create_config)
-    main_eager(main_config, create_config)
+    main(main_config, create_config)
+    # main_eager(main_config, create_config)
