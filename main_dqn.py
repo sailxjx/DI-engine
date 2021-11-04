@@ -1,4 +1,5 @@
-from collections import deque
+from collections import defaultdict, deque
+from typing import List
 import gym
 import random
 import pickle
@@ -204,10 +205,10 @@ class DQNPipeline:
         return _eval
 
 
-def speed_profile(name):
-    buffer = []
+def speed_profile():
+    buffer = defaultdict(list)
 
-    def _speed_profile(fn):
+    def _speed_profile(fn, name):
 
         def _executor(ctx):
             # Execute before step's yield
@@ -228,10 +229,10 @@ def speed_profile(name):
             total_time += time.time() - start
 
             nonlocal buffer
-            buffer.append(total_time)
+            buffer[name].append(total_time)
             if ctx.total_step % 100 == 99:
-                print("Total execute time for {}: {:.2f} ms/step".format(name, np.array(buffer).mean() * 1000))
-                buffer = []
+                print("Total execute time for {}: {:.2f} ms/step".format(name, np.array(buffer[name]).mean() * 1000))
+                buffer[name] = []
 
         return _executor
 
@@ -296,13 +297,13 @@ def main_eager(cfg, create_cfg, seed=0):
     collect = dqn.collect(collector_env, replay_buffer, task)
     learn = dqn.learn(replay_buffer, task)
 
-    sp = speed_profile("learn")
+    sp = speed_profile()
 
     for _ in range(1000):
         task.forward(evaluate)
         task.forward(act)
-        task.forward(collect)
-        task.forward(sp(learn))
+        task.forward(sp(collect, "collect"))
+        task.forward(sp(learn, "learn"))
         # Run rest logic and re init context
         task.backward()
         if task.finish:
