@@ -89,10 +89,10 @@ class Task:
 
     def forward(self, fn):
         g = fn(self.ctx)
-        g = fn(self.ctx)
         if isinstance(g, GeneratorType):
             next(g)
             self.stack.append(g)
+        return self.ctx
 
     def backward(self):
         for g in reversed(self.stack):
