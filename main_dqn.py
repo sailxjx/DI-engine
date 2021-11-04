@@ -55,6 +55,10 @@ class Task:
         self.collect_env_step = 0
         self.train_iter = 0
         self.last_eval_iter = -1
+        # For eager mode
+        self.stack = []
+        self.total_step = 0
+        self.ctx = Context(total_step=0)
 
     def use(self, fn) -> None:
         self.middleware.append(fn)
@@ -77,10 +81,26 @@ class Task:
                 next(g)
                 stack.append(g)
         # TODO how to treat multiple yield
+        # TODO how to use return value or send value to generator
         # Loop over logic after yield
         for g in reversed(stack):
             for _ in g:
                 pass
+
+    def forward(self, fn):
+        g = fn(self.ctx)
+        g = fn(self.ctx)
+        if isinstance(g, GeneratorType):
+            next(g)
+            self.stack.append(g)
+
+    def backward(self):
+        for g in reversed(self.stack):
+            for _ in g:
+                pass
+        self.stack = []
+        self.total_step += 1
+        self.ctx = Context(total_step=self.total_step)
 
 
 class DequeBuffer:
@@ -210,13 +230,51 @@ def main(cfg, create_cfg, seed=0):
     dqn = DQNPipeline(cfg, model)
 
     task.use(dqn.evaluate(evaluator_env, task))
-    for _ in range(8):
-        task.use(dqn.act(collector_env, task))
-        task.use(dqn.collect(collector_env, replay_buffer, task))
+    # for _ in range(8):
+    task.use(dqn.act(collector_env, task))
+    task.use(dqn.collect(collector_env, replay_buffer, task))
     task.use(dqn.learn(replay_buffer, task))
 
     task.run(max_step=1000)
 
 
+def main_eager(cfg, create_cfg, seed=0):
+
+    def wrapped_cartpole_env():
+        return DingEnvWrapper(gym.make('CartPole-v0'))
+
+    cfg = compile_config(cfg, create_cfg=create_cfg, auto=True)
+    collector_env_num, evaluator_env_num = cfg.env.collector_env_num, cfg.env.evaluator_env_num
+    collector_env = BaseEnvManager(env_fn=[wrapped_cartpole_env for _ in range(collector_env_num)], cfg=cfg.env.manager)
+    evaluator_env = BaseEnvManager(env_fn=[wrapped_cartpole_env for _ in range(evaluator_env_num)], cfg=cfg.env.manager)
+
+    collector_env.seed(seed)
+    evaluator_env.seed(seed, dynamic_seed=False)
+    set_pkg_seed(seed, use_cuda=cfg.policy.cuda)
+    collector_env.launch()
+    evaluator_env.launch()
+
+    model = DQN(**cfg.policy.model)
+    replay_buffer = DequeBuffer()
+
+    task = Task()
+    dqn = DQNPipeline(cfg, model)
+
+    evaluate = dqn.evaluate(evaluator_env, task)
+    act = dqn.act(collector_env, task)
+    collect = dqn.collect(collector_env, replay_buffer, task)
+    learn = dqn.learn(replay_buffer, task)
+    for _ in range(1000):
+        task.forward(evaluate)
+        task.forward(act)
+        task.forward(collect)
+        task.forward(learn)
+        # Run rest logic and re init context
+        task.backward()
+        if task.finish:
+            break
+
+
 if __name__ == "__main__":
-    main(main_config, create_config)
+    # main(main_config, create_config)
+    main_eager(main_config, create_config)
