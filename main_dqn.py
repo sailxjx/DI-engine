@@ -5,6 +5,7 @@ import pickle
 import torch
 import time
 import numpy as np
+from types import GeneratorType
 from rich import print
 from ding.model import DQN
 from ding.utils import set_pkg_seed
@@ -69,10 +70,17 @@ class Task:
         if len(middleware) == 0:
             return
 
-        def chain():
-            self.run_one_step(ctx, middleware[1:])
-
-        middleware[0](ctx, chain)
+        stack = []
+        for fn in middleware:
+            g = fn(ctx)
+            if isinstance(g, GeneratorType):
+                next(g)
+                stack.append(g)
+        # TODO how to treat multiple yield
+        # Loop over logic after yield
+        for g in reversed(stack):
+            for _ in g:
+                pass
 
 
 class DequeBuffer:
@@ -103,19 +111,19 @@ class DQNPipeline:
 
     def act(self, env, task):
 
-        def _act(ctx, chain):
+        def _act(ctx):
             eps = self.epsilon_greedy(ctx.step)
             ctx.obs = env.ready_obs
             policy_output = self.policy.collect_mode.forward(ctx.obs, eps=eps)
             ctx.action = to_ndarray({env_id: output['action'] for env_id, output in policy_output.items()})
             ctx.policy_output = policy_output
-            chain()
+            yield
 
         return _act
 
     def collect(self, env, buffer_, task):
 
-        def _collect(ctx, chain):
+        def _collect(ctx):
             timesteps = env.step(ctx.action)
             task.collect_env_step += len(timesteps)
             timesteps = to_tensor(timesteps, dtype=torch.float32)
@@ -124,13 +132,13 @@ class DQNPipeline:
                     ctx.obs[env_id], ctx.policy_output[env_id], timestep
                 )
                 buffer_.push(transition)
-            chain()
+            yield
 
         return _collect
 
     def learn(self, buffer_, task):
 
-        def _learn(ctx, chain):
+        def _learn(ctx):
             for i in range(self.cfg.policy.learn.update_per_collect):
                 data = buffer_.sample(self.policy.learn_mode.get_attribute('batch_size'))
                 if data is None:
@@ -143,16 +151,16 @@ class DQNPipeline:
                         )
                     )
                 task.train_iter += 1
-            chain()
+            yield
 
         return _learn
 
     def evaluate(self, env, task):
 
-        def _eval(ctx, chain):
+        def _eval(ctx):
             eval_interval = task.train_iter - task.last_eval_iter
             if eval_interval < self.cfg.policy.eval.evaluator.eval_freq:
-                chain()
+                yield
                 return
             eval_monitor = VectorEvalMonitor(env.env_num, self.cfg.env.n_evaluator_episode)
             while not eval_monitor.is_finished():
@@ -174,7 +182,7 @@ class DQNPipeline:
             task.last_eval_iter = task.train_iter
             if stop_flag:
                 task.finish = True
-            chain()
+            yield
 
         return _eval
 
