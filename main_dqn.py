@@ -47,11 +47,12 @@ class Context(dict):
         self.done = done
         self.policy_output = policy_output
         self.backward_stack = []
-        self._kept = {}
+        self._finish = False
+        self._kept = {"_finish": True}
 
-    def set_default(self, key, value, keep=False):
+    def set_default(self, key, default, keep=False):
         if key not in self:
-            self[key] = value
+            self[key] = default
         if keep:
             self._kept[key] = True
 
@@ -60,7 +61,6 @@ class Task:
 
     def __init__(self) -> None:
         self.middleware = []
-        self.finish = False
         # For eager mode
         self.ctx = Context(total_step=0)
 
@@ -110,6 +110,10 @@ class Task:
             new_ctx[k] = ctx[k]
         return new_ctx
 
+    @property
+    def finish(self):
+        return self.ctx._finish
+
 
 class DequeBuffer:
 
@@ -137,7 +141,7 @@ class DQNPipeline:
         eps_cfg = cfg.policy.other.eps
         self.epsilon_greedy = get_epsilon_greedy_fn(eps_cfg.start, eps_cfg.end, eps_cfg.decay, eps_cfg.type)
 
-    def act(self, env, task):
+    def act(self, env):
 
         def _act(ctx):
             eps = self.epsilon_greedy(ctx.step)
@@ -149,7 +153,7 @@ class DQNPipeline:
 
         return _act
 
-    def collect(self, env, buffer_, task):
+    def collect(self, env, buffer_):
 
         def _collect(ctx):
             ctx.set_default("collect_env_step", 0, keep=True)
@@ -165,7 +169,7 @@ class DQNPipeline:
 
         return _collect
 
-    def learn(self, buffer_, task):
+    def learn(self, buffer_):
 
         def _learn(ctx):
             ctx.set_default("train_iter", 0, keep=True)
@@ -185,7 +189,7 @@ class DQNPipeline:
 
         return _learn
 
-    def evaluate(self, env, task):
+    def evaluate(self, env):
 
         def _eval(ctx):
             ctx.set_default("train_iter", 0, keep=True)
@@ -213,7 +217,7 @@ class DQNPipeline:
             print('Current Evaluation: Train Iter({})\tEval Reward({:.3f})'.format(ctx.train_iter, eval_reward))
             ctx.last_eval_iter = ctx.train_iter
             if stop_flag:
-                task.finish = True
+                ctx._finish = True
             yield
 
         return _eval
@@ -273,11 +277,10 @@ def main(cfg, create_cfg, seed=0):
     task = Task()
     dqn = DQNPipeline(cfg, model)
 
-    task.use(dqn.evaluate(evaluator_env, task))
-    # for _ in range(8):
-    task.use(dqn.act(collector_env, task))
-    task.use(dqn.collect(collector_env, replay_buffer, task))
-    task.use(dqn.learn(replay_buffer, task))
+    task.use(dqn.evaluate(evaluator_env))
+    task.use(dqn.act(collector_env))
+    task.use(dqn.collect(collector_env, replay_buffer))
+    task.use(dqn.learn(replay_buffer))
 
     task.run(max_step=1000)
 
@@ -304,10 +307,10 @@ def main_eager(cfg, create_cfg, seed=0):
     task = Task()
     dqn = DQNPipeline(cfg, model)
 
-    evaluate = dqn.evaluate(evaluator_env, task)
-    act = dqn.act(collector_env, task)
-    collect = dqn.collect(collector_env, replay_buffer, task)
-    learn = dqn.learn(replay_buffer, task)
+    evaluate = dqn.evaluate(evaluator_env)
+    act = dqn.act(collector_env)
+    collect = dqn.collect(collector_env, replay_buffer)
+    learn = dqn.learn(replay_buffer)
 
     sp = speed_profile()
 
@@ -323,5 +326,9 @@ def main_eager(cfg, create_cfg, seed=0):
 
 
 if __name__ == "__main__":
-    main(main_config, create_config)
+    ctx = Context()
+    ctx.default("key", "value")
+    ctx.keep_this_key = "value", True
+    print(ctx)
+    # main(main_config, create_config)
     # main_eager(main_config, create_config)
