@@ -50,9 +50,9 @@ class Context(dict):
         self._finish = False
         self._kept = {"_finish": True}
 
-    def set_default(self, key, default, keep=False):
+    def set_default(self, key, value, keep=False):
         if key not in self:
-            self[key] = default
+            self[key] = value
         if keep:
             self._kept[key] = True
 
@@ -117,7 +117,7 @@ class Task:
 
 class DequeBuffer:
 
-    def __init__(self, maxlen=10000) -> None:
+    def __init__(self, maxlen=20000) -> None:
         self.memory = deque(maxlen=maxlen)
 
     def push(self, data):
@@ -127,7 +127,9 @@ class DequeBuffer:
         if size > len(self.memory):
             print('[Warning] no enough data: {}/{}'.format(size, len(self.memory)))
             return None
-        return random.sample(self.memory, size)
+        indices = list(np.random.choice(a=len(self.memory), size=size, replace=False))
+        return [self.memory[i] for i in indices]
+        # return random.sample(self.memory, size)
 
     def count(self):
         return len(self.memory)
@@ -144,7 +146,8 @@ class DQNPipeline:
     def act(self, env):
 
         def _act(ctx):
-            eps = self.epsilon_greedy(ctx.step)
+            ctx.set_default("collect_env_step", 0, keep=True)
+            eps = self.epsilon_greedy(ctx.collect_env_step)
             ctx.obs = env.ready_obs
             policy_output = self.policy.collect_mode.forward(ctx.obs, eps=eps)
             ctx.action = to_ndarray({env_id: output['action'] for env_id, output in policy_output.items()})
@@ -156,7 +159,6 @@ class DQNPipeline:
     def collect(self, env, buffer_):
 
         def _collect(ctx):
-            ctx.set_default("collect_env_step", 0, keep=True)
             timesteps = env.step(ctx.action)
             ctx.collect_env_step += len(timesteps)
             timesteps = to_tensor(timesteps, dtype=torch.float32)
@@ -194,10 +196,10 @@ class DQNPipeline:
         def _eval(ctx):
             ctx.set_default("train_iter", 0, keep=True)
             ctx.set_default("last_eval_iter", -1, keep=True)
-            eval_interval = ctx.train_iter - ctx.last_eval_iter
-            if eval_interval < self.cfg.policy.eval.evaluator.eval_freq:
+            if ctx.train_iter == ctx.last_eval_iter or ((ctx.train_iter - ctx.last_eval_iter) < self.cfg.policy.eval.evaluator.eval_freq and ctx.train_iter != 0):
                 yield
                 return
+            env.reset()
             eval_monitor = VectorEvalMonitor(env.env_num, self.cfg.env.n_evaluator_episode)
             while not eval_monitor.is_finished():
                 obs = env.ready_obs
@@ -236,6 +238,8 @@ def speed_profile():
             if isinstance(g, GeneratorType):
                 r = next(g)
             total_time += time.time() - start
+
+            yield r
 
             # Execute after step's yield
             start = time.time()
@@ -278,6 +282,7 @@ def main(cfg, create_cfg, seed=0):
     dqn = DQNPipeline(cfg, model)
 
     task.use(dqn.evaluate(evaluator_env))
+    # for _ in range(8):
     task.use(dqn.act(collector_env))
     task.use(dqn.collect(collector_env, replay_buffer))
     task.use(dqn.learn(replay_buffer))
@@ -316,19 +321,15 @@ def main_eager(cfg, create_cfg, seed=0):
 
     for _ in range(1000):
         task.forward(evaluate)
+        if task.finish:
+            break
         task.forward(act)
         task.forward(sp(collect, "collect"))
         task.forward(sp(learn, "learn"))
         # Run rest logic and re init context
         task.backward()
-        if task.finish:
-            break
 
 
 if __name__ == "__main__":
-    ctx = Context()
-    ctx.default("key", "value")
-    ctx.keep_this_key = "value", True
-    print(ctx)
     # main(main_config, create_config)
-    # main_eager(main_config, create_config)
+    main_eager(main_config, create_config)
